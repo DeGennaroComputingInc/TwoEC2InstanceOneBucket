@@ -19,7 +19,6 @@ Initially, the design would be to have a parameter (AZ) which would specify the 
 ### S3 Buckets 
 For the S3 bucket, I enabled SSE with aws:kms to have data encrypted at rest and created a policy with Resource-specific statements for the global AWS condition SecureAccess; the instance should be able to access the bucket since it is in the same account as long as the instance has an instance profile
 ## Instructions 
-TODO Remove key pair from CFN template
 Using the AWS free tier in the N. Virginia region, automate all steps necessary to complete the following exercise:
 
 #### In your personal Virtual Private Cloud, create two EC2 instances using the type t2.micro.
