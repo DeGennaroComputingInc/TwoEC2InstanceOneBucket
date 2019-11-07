@@ -1,0 +1,447 @@
+{
+    "AWSTemplateFormatVersion" : "2010-09-09",
+    "Description" : "A CloudFormation template to launch two EC2 instances and create a S3 Bucket. HR: https://aws.amazon.com/blogs/security/how-to-use-bucket-policies-and-apply-defense-in-depth-to-help-secure-your-amazon-s3-data/ and https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-s3-bucket-bucketencryption.html for S3 bucket policy that only allows data encrypted in flight and at rest",
+    "Parameters" : {
+        "AZ" : {
+            "Description" : "Availability Zone which to launch instances, create EBS volumes",
+            "Type" : "AWS::EC2::AvailabilityZone::Name"
+        }
+    },
+    "Resources" : {
+        "InstanceASecondVolume": {
+            "Type" : "AWS::EC2::Volume",
+            "Properties" : {
+                "AvailabilityZone" : { "Ref" : "AZ" },
+                "Size" : 1,
+                "VolumeType" :"gp2"
+            }
+        },
+        "InstanceAInstanceProfile":{
+            "Type" : "AWS::IAM::InstanceProfile",
+            "DependsOn": "InstanceARole",
+            "Properties" : {
+                    "InstanceProfileName" : "InstanceAInstanceProfile",
+                    "Roles" : [ "InstanceARole"]
+            }
+        },
+        "InstanceARole":{
+            "Type" : "AWS::IAM::Role",
+            "Properties" : {
+                "AssumeRolePolicyDocument" : {
+                    "Version" : "2012-10-17",
+                    "Statement": [ {
+                        "Effect": "Allow",
+                        "Principal": {
+                            "Service": [ "ec2.amazonaws.com" ]
+                        },
+                        "Action": [ "sts:AssumeRole" ]
+                    } ]
+                },
+                "RoleName" : "InstanceARole",
+                "Description" : "The IAM role attached to the instance profile for Instance A",
+                "Policies" : [ {
+                    "PolicyName": "RebootEC2Instances",
+                    "PolicyDocument": {
+                        "Version" : "2012-10-17",
+                        "Statement": [ {
+                            "Effect": "Allow",
+                            "Action": "ec2:*",
+                            "Resource": "*"
+                        } ]
+                    }
+                },{
+                    "PolicyName": "PutFileToS3Bucket",
+                    "PolicyDocument": {
+                        "Version" : "2012-10-17",
+                        "Statement": [ {
+                            "Effect": "Allow",
+                            "Action": "s3:PutObject",
+                            "Resource":{
+                                "Fn::Join" : [ "", [
+                                    "arn:aws:s3:::", {"Ref" : "Bucket"}, "/*"
+                                ]]
+                            }
+                        } ]
+                    }
+                }]
+            }
+        },
+        "InstanceA": {
+            "Type" : "AWS::EC2::Instance",
+            "DependsOn" : ["InstanceASecondVolume","InstanceAInstanceProfile"],
+            "Properties" : {
+                "AvailabilityZone" : { "Ref" : "AZ" },
+                "BlockDeviceMappings" : [
+                    {
+                        "DeviceName" : "/dev/xvda",
+                        "Ebs" : { "VolumeSize" : "9" }
+                    }
+                ],
+                "IamInstanceProfile" : { "Ref" : "InstanceAInstanceProfile" },
+                "ImageId" : "ami-0080e4c5bc078760e",
+                "InstanceType" : "t2.micro",
+                "UserData" : {
+                    "Fn::Base64" : {
+                        "Fn::Join" : [ "", [
+                            "#!/bin/bash -xe", "\n",
+                            "yum install -y xfsprogs", "\n",
+                            "SECOND_VOLUME=$(lsblk | awk '$1 ~ /df/ && $4 ~ /1G/ && $6 ~ /disk/ {print $1}')", "\n",
+                            "SECOND_VOLUME_FS=$(file -s /dev/$SECOND_VOLUME | awk '{ sub(/([^:]+:+ )/,\"\") }1')", "\n",
+                            "if [ \"$SECOND_VOLUME_FS\" == \"data\" ];", "\n",
+                            "then echo \"Making to xfs\";", "\n",
+                            "mkfs.xfs /dev/xvdf", "\n",
+                            "SUBSTRING=\"XFS\"", "\n",
+                            "#HR: https://stackoverflow.com/a/20460402", "\n",
+                            "elif [ -z \"${SECOND_VOLUME_FS##*$XFS*}\" ];", "\n",
+                            "then echo \"Already XFS, do nothing\";", "\n",
+                            "else echo \"Already a filesystem on there but not XFS, exiting\";", "\n",
+                            "exit;", "\n",
+                            "fi", "\n",
+                            "FSTYPE=\"xfs\"", "\n",
+                            "MOUNTPOINT=/dataup", "\n",
+                            "mkdir -p $MOUNTPOINT", "\n",
+                            "echo -e \"/dev/$SECOND_VOLUME\t$MOUNTPOINT\t$FSTYPE\tdefaults\t0\t0\" >> /etc/fstab", "\n",
+                            "mount -a", "\n",
+                            "METADATA_SERVICE=http://169.254.169.254/latest/meta-data/", "\n",
+                            "INSTANCE_ID_SUFFIX=instance-id", "\n",
+                            "REGION_SUFFIX=placement/availability-zone", "\n",
+                            "INSTANCE_ID=$(curl $METADATA_SERVICE$INSTANCE_ID_SUFFIX)", "\n",
+                            "REGION=$(curl $METADATA_SERVICE$REGION_SUFFIX)", "\n",
+                            "cat > $MOUNTPOINT/file.txt << EOF", "\n",
+                            "This is a test", "\n",
+                            "EOF", "\n",
+                            "cat > /root/putFileToS3.sh << EOF", "\n",
+                            "#!/bin/bash", "\n",
+                            "if [ -e $MOUNTPOINT/file.txt ];", "\n",
+                            "then aws s3 cp $MOUNTPOINT/file.txt s3://goviniassessment/;", "\n",
+                            "fi", "\n",
+                            "EOF", "\n",
+                            "chmod +x /root/putFileToS3.sh", "\n",
+                            "cat > /etc/cron.d/put_file << EOF", "\n",
+                            "* * * * * root /bin/sh /root/putFileToS3.sh", "\n",
+                            "EOF", "\n",
+                            "aws ec2 --region ${REGION%%[a-z]} reboot-instances --instance-ids $INSTANCE_ID", "\n"
+                        ]]
+                    }
+                },
+                "Volumes" : [{
+                    "Device": "/dev/sdf",
+                    "VolumeId":{"Ref":"InstanceASecondVolume"}
+                }]
+            }
+        },
+        "InstanceBSecondVolume": {
+            "Type" : "AWS::EC2::Volume",
+            "Properties" : {
+                "AvailabilityZone" : { "Ref" : "AZ" },
+                "Encrypted": true,
+                "Size" : 1,
+                "VolumeType" :"gp2" 
+            }
+        },
+        "InstanceBThirdVolume": {
+            "Type" : "AWS::EC2::Volume",
+            "Properties" : {
+                "AvailabilityZone" : { "Ref" : "AZ" },
+                "Encrypted": true,
+                "Size" : 1,
+                "VolumeType" :"gp2" 
+            }
+        },
+        "InstanceBInstanceProfile":{
+            "Type" : "AWS::IAM::InstanceProfile",
+            "DependsOn": "InstanceBRole",
+            "Properties" : {
+                    "InstanceProfileName" : "InstanceBInstanceProfile",
+                    "Roles" : [ "InstanceBRole"]
+            }
+        },
+        "InstanceBRole":{
+            "Type" : "AWS::IAM::Role",
+            "Properties" : {
+                "AssumeRolePolicyDocument" : {
+                    "Version" : "2012-10-17",
+                    "Statement": [ {
+                        "Effect": "Allow",
+                        "Principal": {
+                            "Service": [ "ec2.amazonaws.com" ]
+                        },
+                        "Action": [ "sts:AssumeRole" ]
+                    } ]
+                },
+                "RoleName" : "InstanceBRole",
+                "Description" : "The IAM role attached to the instance profile for Instance B",
+                "Policies" : [ {
+                    "PolicyName": "RebootEC2Instances",
+                    "PolicyDocument": {
+                        "Version" : "2012-10-17",
+                        "Statement": [ {
+                            "Effect": "Allow",
+                            "Action": "ec2:*",
+                            "Resource": "*"
+                        } ]
+                    }
+                },{
+                    "PolicyName": "GetFileFromS3Bucket",
+                    "PolicyDocument": {
+                        "Version" : "2012-10-17",
+                        "Statement": [ {
+                            "Effect": "Allow",
+                            "Action": "s3:GetObject",
+                            "Resource":{
+                                "Fn::Join" : [ "", [
+                                    "arn:aws:s3:::", {"Ref" : "Bucket"}, "/*"
+                                ]]
+                            }
+                        } ]
+                    }
+                }]
+            }
+        },
+        "InstanceB": {
+            "Type" : "AWS::EC2::Instance",
+            "DependsOn" : ["InstanceBSecondVolume", "InstanceBThirdVolume", "InstanceBInstanceProfile"], 
+            "Properties" : {
+                "AvailabilityZone" : { "Ref" : "AZ" },
+                "BlockDeviceMappings" : [
+                    {
+                        "DeviceName" : "/dev/sda1",
+                        "Ebs" : { "VolumeSize" : "9" }
+                    }
+                ],
+                "IamInstanceProfile" : { "Ref" : "InstanceBInstanceProfile" },
+                "ImageId" : "ami-05a36d3b9aa4a17ac",
+                "InstanceType" : "t2.micro",
+                "UserData" :{
+                    "Fn::Base64" : {
+                        "Fn::Join" : [ "", [
+                            "#!/bin/bash -xe", "\n",
+                            "apt-get update", "\n",
+                            "apt-get install -y xfsprogs", "\n",
+                            "# HR https://unix.stackexchange.com/questions/277664/install-mdadm-without-postfix-in-ubuntu-trusty", "\n",
+                            "apt-get install -y --no-install-recommends mdadm", "\n",
+                            "apt-get install -y awscli", "\n",
+                            "dpkg --force-all -r initramfs-tools", "\n",
+                            "mkdir -p /usr/local/pkg", "\n",
+                            "cd /usr/local/pkg", "\n",
+                            "wget http://archive.ubuntu.com/ubuntu/pool/universe/d/dracut/dracut_027-1_all.deb", "\n",
+                            "dpkg --force-all -i dracut_027-1_all.deb", "\n",
+                            "SECOND_VOLUME=$(lsblk | awk '$1 ~ /df/ && $4 ~ /1G/ && $6 ~ /disk/ {print $1}')", "\n",
+                            "if [ -z  $SECOND_VOLUME ];", "\n",
+                            "then echo \"SECOND_VOLUME not attached, something wrong, bailing\";", "\n",
+                            "exit;", "\n",
+                            "fi", "\n",
+                            "THIRD_VOLUME=$(lsblk | awk '$1 ~ /dg/ && $4 ~ /1G/ && $6 ~ /disk/ {print $1}')", "\n",
+                            "if [ -z  $THIRD_VOLUME ];", "\n",
+                            "then echo \"THIRD_VOLUME not attached, something wrong, bailing\";", "\n",
+                            "exit;", "\n",
+                            "fi", "\n",
+                            "SECOND_VOLUME_FS=$(file -s /dev/$SECOND_VOLUME | awk '{ sub(/([^:]+:+ )/,\"\") }1')", "\n",
+                            "if [ \"$SECOND_VOLUME_FS\" == \"data\" ];", "\n",
+                            "then echo \"No filesystem on SECOND_VOLUME, checking THIRD_VOLUME\";", "\n",
+                            "else echo \"There is a filesystem on SECOND_VOLUME, bailing\";", "\n",
+                            "exit;", "\n",
+                            "fi", "\n",
+                            "THIRD_VOLUME_FS=$(file -s /dev/$THIRD_VOLUME | awk '{ sub(/([^:]+:+ )/,\"\") }1')", "\n",
+                            "if [ \"$THIRD_VOLUME_FS\" == \"data\" ];", "\n",
+                            "then echo \"No filesystem on THIRD_VOLUME, createing a RAID array\";", "\n",
+                            "else echo \"There is a filesystem on THIRD_VOLUME, bailing\";", "\n",
+                            "exit; ", "\n",
+                            "fi", "\n",
+                            "ARRAY_LABEL=2EBSRAID0", "\n",
+                            "#HR https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/raid-config.html", "\n",
+                            "mdadm --create  /dev/md0 --level=0 --name=$ARRAY_LABEL --raid-devices=2 /dev/$SECOND_VOLUME /dev/$THIRD_VOLUME;", "\n",
+                            "#HR man mdadm Note the contrast between --examine and --detail.  --examine applies to devices which", "\n",
+                            "#              are components of an array, while --detail applies to a whole array which is currently active.", "\n",
+                            "mdadm -b --detail --test /dev/md0;", "\n",
+                            "while [ $? -ne 0 ];", "\n",
+                            "do mdadm -b --detail --test /dev/md0;", "\n",
+                            "sleep 1;", "\n",
+                            "done", "\n",
+                            "SECOND_COMPONENT_DETAILS=$(mdadm --examine --test /dev/$SECOND_VOLUME; echo \"Command status: \"$?)", "\n",
+                            "echo $SECOND_COMPONENT_DETAILS;", "\n",
+                            "THIRD_COMPONENTS_DETAILS=$(mdadm --examine --test /dev/$THIRD_VOLUME; echo \"Command status: \"$?)", "\n",
+                            "echo $THIRD_COMPONENT_DETAILS;", "\n",
+                            "ARRAY_DETAILS=$(mdadm --detail --test /dev/md0; echo \"Command status: \"$?)", "\n",
+                            "echo $ARRAY_DETAILS", "\n",
+                            "mkfs.xfs -L $ARRAY_LABEL /dev/md0", "\n",
+                            "mdadm --detail --scan | tee -a /etc/mdadm.conf", "\n",
+                            "dracut -H -f /boot/initramfs-$(uname -r).img $(uname -r)", "\n",
+                            "FSTYPE=\"xfs\"", "\n",
+                            "MOUNTPOINT=/datadown", "\n",
+                            "mkdir -p $MOUNTPOINT", "\n",
+                            "echo -e \"LABEL=$ARRAY_LABEL\t$MOUNTPOINT\t$FSTYPE\tdefaults,auto,nofail,nobootwait\t0\t2\" >> /etc/fstab", "\n",
+                            "mount -a", "\n",
+                            "METADATA_SERVICE=http://169.254.169.254/latest/meta-data/", "\n",
+                            "INSTANCE_ID_SUFFIX=instance-id", "\n",
+                            "REGION_SUFFIX=placement/availability-zone", "\n",
+                            "INSTANCE_ID=$(curl $METADATA_SERVICE$INSTANCE_ID_SUFFIX)", "\n",
+                            "REGION=$(curl $METADATA_SERVICE$REGION_SUFFIX)", "\n",
+                            "cat > /root/getFileFromS3.sh << EOF", "\n",
+                            "#!/bin/bash", "\n",
+                            "if [ ! -e $MOUNTPOINT/file.txt ];", "\n",
+                            "then aws --region ${REGION%%[a-z]} s3 cp s3://goviniassessment/file.txt $MOUNTPOINT/file.txt ;", "\n",
+                            "fi", "\n",
+                            "EOF", "\n",
+                            "chmod +x /root/getFileFromS3.sh", "\n",
+                            "cat > /etc/cron.d/get_file << EOF", "\n",
+                            "* * * * * root /bin/sh /root/getFileFromS3.sh", "\n",
+                            "EOF", "\n",
+                            "#aws ec2 --region ${REGION%%[a-z]} reboot-instances --instance-ids $INSTANCE_ID", "\n"
+                        ]]
+                    }
+                },
+                "Volumes" : [{
+                    "Device": "/dev/sdf",
+                    "VolumeId":{"Ref":"InstanceBSecondVolume"}
+                },{
+                    "Device": "/dev/sdg",
+                    "VolumeId":{"Ref":"InstanceBThirdVolume"}
+                }]
+            }
+        },
+        "Bucket": {
+            "Type" : "AWS::S3::Bucket",
+            "Properties" : {
+                "BucketEncryption" : {
+                    "ServerSideEncryptionConfiguration" : [
+                        {
+                            "ServerSideEncryptionByDefault" : {
+                                "SSEAlgorithm" : "aws:kms" 
+                            }
+                        }]
+                },
+                "BucketName" : "goviniassessment"
+            }
+        },
+        "Bucketpolicy" : {
+            "Type" : "AWS::S3::BucketPolicy",
+            "Properties" : {
+                "Bucket" : {"Ref" : "Bucket"},
+                "PolicyDocument": {
+                        "Version": "2012-10-17",
+                        "Id": "EncryptDataInFlightBucketPolicy",
+                        "Statement": [
+                            {
+                                "Sid": "EncryptDataInFlightObjectActions",
+                                "Effect": "Deny",
+                                "Principal": "*",
+                                "Action": [
+                                    "s3:AbortMultipartUpload",
+                                    "s3:BypassGovernanceRetention",
+                                    "s3:DeleteObject",
+                                    "s3:DeleteObjectTagging",
+                                    "s3:DeleteObjectVersion",
+                                    "s3:DeleteObjectVersionTagging",
+                                    "s3:GetObject",
+                                    "s3:GetObjectAcl",
+                                    "s3:GetObjectLegalHold",
+                                    "s3:GetObjectRetention",
+                                    "s3:GetObjectTagging",
+                                    "s3:GetObjectTorrent",
+                                    "s3:GetObjectVersion",
+                                    "s3:GetObjectVersionAcl",
+                                    "s3:GetObjectVersionTagging",
+                                    "s3:GetObjectVersionTorrent",
+                                    "s3:ListMultipartUploadParts",
+                                    "s3:PutObject",
+                                    "s3:PutObjectAcl",
+                                    "s3:PutObjectLegalHold",
+                                    "s3:PutObjectRetention",
+                                    "s3:PutObjectTagging",
+                                    "s3:PutObjectVersionAcl",
+                                    "s3:PutObjectVersionTagging",
+                                    "s3:RestoreObject"
+                                ],
+                                "Resource": [
+                                    { "Fn::Join" : [ "", [
+                                        "arn:aws:s3:::", {"Ref" : "Bucket"}, "/*"
+                                    ]]}
+                                ],
+                                "Condition": {
+                                    "Bool": {
+                                        "aws:SecureTransport": "false"
+                                    }
+                                }
+                            },
+                            {
+                                "Sid": "EncryptDataInFlightBucketActions",
+                                "Effect": "Deny",
+                                "Principal": "*",
+                                "Action": [
+                                    "s3:DeleteBucket",
+                                    "s3:ListBucket",
+                                    "s3:ListBucketVersions",
+                                    "s3:ListBucketMultipartUploads",
+                                    "s3:DeleteBucketPolicy",
+                                    "s3:DeleteBucketWebsite",
+                                    "s3:GetAccelerateConfiguration",
+                                    "s3:GetAnalyticsConfiguration",
+                                    "s3:GetBucketAcl",
+                                    "s3:GetBucketCORS",
+                                    "s3:GetBucketLocation",
+                                    "s3:GetBucketLogging",
+                                    "s3:GetBucketNotification",
+                                    "s3:GetBucketObjectLockConfiguration",
+                                    "s3:GetBucketPolicy",
+                                    "s3:GetBucketPolicyStatus",
+                                    "s3:GetBucketPublicAccessBlock",
+                                    "s3:GetBucketRequestPayment",
+                                    "s3:GetBucketTagging",
+                                    "s3:GetBucketVersioning",
+                                    "s3:GetBucketWebsite",
+                                    "s3:GetEncryptionConfiguration",
+                                    "s3:GetInventoryConfiguration",
+                                    "s3:GetLifecycleConfiguration",
+                                    "s3:GetMetricsConfiguration",
+                                    "s3:GetReplicationConfiguration",
+                                    "s3:PutAccelerateConfiguration",
+                                    "s3:PutAnalyticsConfiguration",
+                                    "s3:PutBucketAcl",
+                                    "s3:PutBucketCORS",
+                                    "s3:PutBucketLogging",
+                                    "s3:PutBucketNotification",
+                                    "s3:PutBucketObjectLockConfiguration",
+                                    "s3:PutBucketPolicy",
+                                    "s3:PutBucketPublicAccessBlock",
+                                    "s3:PutBucketRequestPayment",
+                                    "s3:PutBucketTagging",
+                                    "s3:PutBucketVersioning",
+                                    "s3:PutBucketWebsite",
+                                    "s3:PutEncryptionConfiguration",
+                                    "s3:PutInventoryConfiguration",
+                                    "s3:PutLifecycleConfiguration",
+                                    "s3:PutMetricsConfiguration",
+                                    "s3:PutReplicationConfiguration"
+                                ],
+                                "Resource": [
+                                    { "Fn::Join" : [ "", [
+                                        "arn:aws:s3:::", {"Ref" : "Bucket"}
+                                    ]]}
+                                ],
+                                "Condition": {
+                                    "Bool": {
+                                        "aws:SecureTransport": "false"
+                                    }
+                                }
+                            }
+                        ]
+                    }
+                }
+        }
+    },
+    "Outputs" : {
+        "InstanceAOutput" : {
+            "Description": "The instance ID of Instance A",
+            "Value" : { "Ref" : "InstanceA" }
+        },
+        "InstanceOutput" : {
+            "Description": "The instance ID of Instance B",
+            "Value" : { "Ref" : "InstanceB" }
+        },
+        "BucketOutput" : {
+            "Description": "The bucket",
+            "Value" : { "Ref" : "Bucket" }
+        }
+  }
+}
