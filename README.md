@@ -19,7 +19,6 @@ Initially, the design would be to have a parameter (AZ) which would specify the 
 ### S3 Buckets 
 For the S3 bucket, I enabled SSE with aws:kms to have data encrypted at rest and created a policy with Resource-specific statements for the global AWS condition SecureAccess; the instance should be able to access the bucket since it is in the same account as long as the instance has an instance profile
 ## Instructions 
-TODO Remove key pair from CFN template
 Using the AWS free tier in the N. Virginia region, automate all steps necessary to complete the following exercise:
 
 #### In your personal Virtual Private Cloud, create two EC2 instances using the type t2.micro.
@@ -170,7 +169,7 @@ Consequently, instance B does the same except getting the file to /datadown ever
 ## Resources 
 ### AWS
 #### AWS Docs
--[wait Condition Handler](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/using-cfn-waitcondition.html)
+- [wait Condition Handler](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/using-cfn-waitcondition.html)
 - [AWS::EC2::Volume](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-ec2-ebs-volume.html#cfn-ec2-ebs-volume-size)
 - [Amazon EC2 Instance Store](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/InstanceStorage.html)
 - [What is the difference between volume and blockdevicemappings in CloudFormation?](https://stackoverflow.com/questions/37372693/what-is-the-difference-between-volume-and-blockdevicemapping-tags-in-ec2-cloudfo)
@@ -185,5 +184,5 @@ Consequently, instance B does the same except getting the file to /datadown ever
 #### Launch the CloudFormation template
 ```
 #This assumes you have your credentials in the [default] profile in ~/.aws/config or ~/.aws/credentials 
-aws cloudformation --region us-east-1 create-stack --stack-name GoviniAssessment --template-body file:///Path/to/the/template/TwoEC2InstancesOneBucket.json --parameters ParameterKey=AZ,ParameterValue=us-east-1a --capabilities "CAPABILITY_NAMED_IAM"
+aws cloudformation --region us-east-1 create-stack --stack-name Assessment --template-body file:///Path/to/the/template/TwoEC2InstancesOneBucket.json --parameters ParameterKey=AZ,ParameterValue=us-east-1a --capabilities "CAPABILITY_NAMED_IAM"
 ```
