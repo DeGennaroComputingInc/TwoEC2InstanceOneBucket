@@ -1,17 +1,24 @@
 {
     "AWSTemplateFormatVersion" : "2010-09-09",
-    "Description" : "A CloudFormation template to launch two EC2 instances and create a S3 Bucket. HR: https://aws.amazon.com/blogs/security/how-to-use-bucket-policies-and-apply-defense-in-depth-to-help-secure-your-amazon-s3-data/ and https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-s3-bucket-bucketencryption.html for S3 bucket policy that only allows data encrypted in flight and at rest",
+    "Description" : "A CloudFormation template to launch two EC2 instances with different EBS volume attachment and filesystem/raid configurations; also create an S3 Bucket that Instance A will upload a file to and Instance B will download a file from. HR: https://aws.amazon.com/blogs/security/how-to-use-bucket-policies-and-apply-defense-in-depth-to-help-secure-your-amazon-s3-data/ and https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-s3-bucket-bucketencryption.html for S3 bucket policy that only allows data encrypted in flight and at rest ",
     "Parameters" : {
-        "AZ" : {
+        "EC2InstanceAZ" : {
             "Description" : "Availability Zone which to launch instances, create EBS volumes",
             "Type" : "AWS::EC2::AvailabilityZone::Name"
-        }
+        },
+        "S3BucketName": {
+            "Description": "The bucket where Instance A will upload to and Instance B will download from",
+            "Type": "String",
+            "MinLength" : 3,
+            "MaxLength" : 63,
+            "AllowedPattern" : "^[a-z0-9][-a-z0-9]*$"
+        },
     },
     "Resources" : {
         "InstanceASecondVolume": {
             "Type" : "AWS::EC2::Volume",
             "Properties" : {
-                "AvailabilityZone" : { "Ref" : "AZ" },
+                "AvailabilityZone" : { "Ref" : "EC2InstanceAZ" },
                 "Size" : 1,
                 "VolumeType" :"gp2"
             }
@@ -58,7 +65,7 @@
                             "Action": "s3:PutObject",
                             "Resource":{
                                 "Fn::Join" : [ "", [
-                                    "arn:aws:s3:::", {"Ref" : "Bucket"}, "/*"
+                                    "arn:aws:s3:::", {"Ref" : "S3Bucket"}, "/*"
                                 ]]
                             }
                         } ]
@@ -70,7 +77,7 @@
             "Type" : "AWS::EC2::Instance",
             "DependsOn" : ["InstanceASecondVolume","InstanceAInstanceProfile"],
             "Properties" : {
-                "AvailabilityZone" : { "Ref" : "AZ" },
+                "AvailabilityZone" : { "Ref" : "EC2InstanceAZ" },
                 "BlockDeviceMappings" : [
                     {
                         "DeviceName" : "/dev/xvda",
@@ -112,9 +119,10 @@
                             "EOF", "\n",
                             "cat > /root/putFileToS3.sh << EOF", "\n",
                             "if [ -e $MOUNTPOINT/file.txt ];", "\n",
-                            "then aws s3 cp $MOUNTPOINT/file.txt s3://goviniassessment/;", "\n",
+                            "then aws s3 cp $MOUNTPOINT/file.txt s3://", {"Ref" : "S3Bucket"}, "/;", "\n",
                             "fi", "\n",
                             "EOF", "\n",
+                            "#HR https://stackoverflow.com/questions/2388087/how-to-get-cron-to-call-in-the-correct-paths", "\n",
                             "chmod +x /root/putFileToS3.sh", "\n",
                             "cat > /etc/cron.d/put_file << EOF", "\n",
                             "SHELL=/bin/bash", "\n",
@@ -134,7 +142,7 @@
         "InstanceBSecondVolume": {
             "Type" : "AWS::EC2::Volume",
             "Properties" : {
-                "AvailabilityZone" : { "Ref" : "AZ" },
+                "AvailabilityZone" : { "Ref" : "EC2InstanceAZ" },
                 "Encrypted": true,
                 "Size" : 1,
                 "VolumeType" :"gp2" 
@@ -143,7 +151,7 @@
         "InstanceBThirdVolume": {
             "Type" : "AWS::EC2::Volume",
             "Properties" : {
-                "AvailabilityZone" : { "Ref" : "AZ" },
+                "AvailabilityZone" : { "Ref" : "EC2InstanceAZ" },
                 "Encrypted": true,
                 "Size" : 1,
                 "VolumeType" :"gp2" 
@@ -191,7 +199,7 @@
                             "Action": "s3:GetObject",
                             "Resource":{
                                 "Fn::Join" : [ "", [
-                                    "arn:aws:s3:::", {"Ref" : "Bucket"}, "/*"
+                                    "arn:aws:s3:::", {"Ref" : "S3Bucket"}, "/*"
                                 ]]
                             }
                         } ]
@@ -203,7 +211,7 @@
             "Type" : "AWS::EC2::Instance",
             "DependsOn" : ["InstanceBSecondVolume", "InstanceBThirdVolume", "InstanceBInstanceProfile"], 
             "Properties" : {
-                "AvailabilityZone" : { "Ref" : "AZ" },
+                "AvailabilityZone" : { "Ref" : "EC2InstanceAZ" },
                 "BlockDeviceMappings" : [
                     {
                         "DeviceName" : "/dev/sda1",
@@ -223,11 +231,7 @@
                             "apt-get install -y --no-install-recommends mdadm", "\n",
                             "apt-get install -y python-pip", "\n",
                             "pip install awscli", "\n",
-                            "dpkg --force-all -r initramfs-tools", "\n",
-                            "mkdir -p /usr/local/pkg", "\n",
-                            "cd /usr/local/pkg", "\n",
-                            "wget http://archive.ubuntu.com/ubuntu/pool/universe/d/dracut/dracut_027-1_all.deb", "\n",
-                            "dpkg --force-all -i dracut_027-1_all.deb", "\n",
+                            "apt-get install -y initramfs-tools", "\n",
                             "SECOND_VOLUME=$(lsblk | awk '$1 ~ /df/ && $4 ~ /1G/ && $6 ~ /disk/ {print $1}')", "\n",
                             "if [ -z  $SECOND_VOLUME ];", "\n",
                             "then echo \"SECOND_VOLUME not attached, something wrong, bailing\";", "\n",
@@ -267,21 +271,22 @@
                             "ARRAY_DETAILS=$(mdadm --detail --test /dev/md0; echo \"Command status: \"$?)", "\n",
                             "echo $ARRAY_DETAILS", "\n",
                             "mkfs.xfs -L $ARRAY_LABEL /dev/md0", "\n",
-                            "mdadm --detail --scan | tee -a /etc/mdadm.conf", "\n",
-                            "dracut -H -f /boot/initramfs-$(uname -r).img $(uname -r)", "\n",
+                            "mdadm --detail --scan | tee -a /etc/mdadm/mdadm.conf", "\n",
+                            "update-initramfs -u", "\n",
                             "FSTYPE=\"xfs\"", "\n",
                             "MOUNTPOINT=/datadown", "\n",
                             "mkdir -p $MOUNTPOINT", "\n",
-                            "echo -e \"LABEL=$ARRAY_LABEL\t$MOUNTPOINT\t$FSTYPE\tdefaults,auto,nofail,nobootwait\t0\t2\" >> /etc/fstab", "\n",
+                            "echo -e \"/dev/md0\t$MOUNTPOINT\t$FSTYPE\tdefaults,nofail,nobootwait\t0\t2\" >> /etc/fstab", "\n",
                             "mount -a", "\n",
                             "METADATA_SERVICE=http://169.254.169.254/latest/meta-data/", "\n",
                             "INSTANCE_ID_SUFFIX=instance-id", "\n",
                             "REGION_SUFFIX=placement/availability-zone", "\n",
                             "INSTANCE_ID=$(curl $METADATA_SERVICE$INSTANCE_ID_SUFFIX)", "\n",
                             "REGION=$(curl $METADATA_SERVICE$REGION_SUFFIX)", "\n",
+                            "#HR https://stackoverflow.com/questions/2388087/how-to-get-cron-to-call-in-the-correct-paths", "\n",
                             "cat > /root/getFileFromS3.sh << EOF", "\n",
                             "if [ ! -e $MOUNTPOINT/file.txt ];", "\n",
-                            "then aws --region ${REGION%%[a-z]} s3 cp s3://goviniassessment/file.txt $MOUNTPOINT/file.txt ;", "\n",
+                            "then aws --region ${REGION%%[a-z]} s3 cp s3://", {"Ref" : "S3Bucket"}, "/file.txt $MOUNTPOINT/file.txt ;", "\n",
                             "fi", "\n",
                             "EOF", "\n",
                             "chmod +x /root/getFileFromS3.sh", "\n",
@@ -290,7 +295,7 @@
                             "PATH=$(echo $PATH)", "\n",
                             "* * * * * root /root/getFileFromS3.sh", "\n",
                             "EOF", "\n",
-                            "#aws ec2 --region ${REGION%%[a-z]} reboot-instances --instance-ids $INSTANCE_ID", "\n"
+                            "aws ec2 --region ${REGION%%[a-z]} reboot-instances --instance-ids $INSTANCE_ID", "\n"
                         ]]
                     }
                 },
@@ -303,7 +308,7 @@
                 }]
             }
         },
-        "Bucket": {
+        "S3Bucket": {
             "Type" : "AWS::S3::Bucket",
             "Properties" : {
                 "BucketEncryption" : {
@@ -314,13 +319,13 @@
                             }
                         }]
                 },
-                "BucketName" : "goviniassessment"
+                "BucketName" : {"Ref" : "S3BucketName"}
             }
         },
-        "Bucketpolicy" : {
+        "S3Bucketpolicy" : {
             "Type" : "AWS::S3::BucketPolicy",
             "Properties" : {
-                "Bucket" : {"Ref" : "Bucket"},
+                "Bucket" : {"Ref" : "S3Bucket"},
                 "PolicyDocument": {
                         "Version": "2012-10-17",
                         "Id": "EncryptDataInFlightBucketPolicy",
@@ -358,7 +363,7 @@
                                 ],
                                 "Resource": [
                                     { "Fn::Join" : [ "", [
-                                        "arn:aws:s3:::", {"Ref" : "Bucket"}, "/*"
+                                        "arn:aws:s3:::", {"Ref" : "S3Bucket"}, "/*"
                                     ]]}
                                 ],
                                 "Condition": {
@@ -419,7 +424,7 @@
                                 ],
                                 "Resource": [
                                     { "Fn::Join" : [ "", [
-                                        "arn:aws:s3:::", {"Ref" : "Bucket"}
+                                        "arn:aws:s3:::", {"Ref" : "S3Bucket"}
                                     ]]}
                                 ],
                                 "Condition": {
@@ -442,9 +447,9 @@
             "Description": "The instance ID of Instance B",
             "Value" : { "Ref" : "InstanceB" }
         },
-        "BucketOutput" : {
+        "S3BucketOutput" : {
             "Description": "The bucket",
-            "Value" : { "Ref" : "Bucket" }
+            "Value" : { "Ref" : "S3Bucket" }
         }
   }
 }
